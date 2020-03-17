@@ -1,5 +1,6 @@
 require 'zip/filesystem'
 require 'nokogiri'
+require 'creek/sax_parser'
 
 module Creek
   class Creek::Sheet
@@ -75,6 +76,24 @@ module Creek
       rows_generator true, true
     end
 
+    def fast_rows
+      path = if @sheetfile.start_with? "/xl/" or @sheetfile.start_with? "xl/" then @sheetfile else "xl/#{@sheetfile}" end
+      if @book.files.file.exist?(path)
+        # SAX parsing, Each element in the stream comes through as two events:
+        # one to open the element and one to close it.
+        opener = Nokogiri::XML::Reader::TYPE_ELEMENT
+        closer = Nokogiri::XML::Reader::TYPE_END_ELEMENT
+
+        Enumerator.new do |y|
+          parser = Nokogiri::XML::SAX::Parser.new(SAXParser.new(y, book))
+
+          @book.files.file.open(path) do |xml|
+            parser.parse(xml)
+          end
+        end
+      end
+    end
+
     private
 
     ##
@@ -88,28 +107,16 @@ module Creek
         opener = Nokogiri::XML::Reader::TYPE_ELEMENT
         closer = Nokogiri::XML::Reader::TYPE_END_ELEMENT
         Enumerator.new do |y|
-          row, cells, cell = nil, {}, nil
+          cells, cell = nil, {}, nil
           cell_type  = nil
           cell_style_idx = nil
           @book.files.file.open(path) do |xml|
             Nokogiri::XML::Reader.from_io(xml).each do |node|
               if (node.name.eql? 'row') and (node.node_type.eql? opener)
-                row = node.attributes
-                row['cells'] = Hash.new
                 cells = Hash.new
-                y << (include_meta_data ? row : cells) if node.self_closing?
+                y << cells if node.self_closing?
               elsif (node.name.eql? 'row') and (node.node_type.eql? closer)
-                processed_cells = fill_in_empty_cells(cells, row['r'], cell, use_simple_rows_format)
-
-                if @images_present
-                  processed_cells.each do |cell_name, cell_value|
-                    next unless cell_value.nil?
-                    processed_cells[cell_name] = images_at(cell_name)
-                  end
-                end
-
-                row['cells'] = processed_cells
-                y << (include_meta_data ? row : processed_cells)
+                y << cells
               elsif (node.name.eql? 'c') and (node.node_type.eql? opener)
                 cell_type      = node.attributes['t']
                 cell_style_idx = node.attributes['s']
